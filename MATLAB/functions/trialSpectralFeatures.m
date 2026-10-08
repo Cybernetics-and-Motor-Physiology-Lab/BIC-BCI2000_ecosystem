@@ -7,8 +7,9 @@ function [trialSpectFeatures, STFTs] = trialSpectralFeatures(data, stim, srate, 
 % Inputs
 %   data        - [samples x channels] signal matrix.
 %   stim        - [samples x 1] stimulus/state vector.
-%                 Assumption: stim == 0 means no active trial.
-%                 Nonzero contiguous segments are treated as trials.
+%                 Assumption: stim == 0 means no active trial and
+%                 stim == -1 marks artifact samples that are excluded.
+%                 Changes between non-artifact stimulus codes define trials.
 %   srate       - Sampling rate in Hz.
 % Optional inputs
 %   window      - Welch/spectral window. Default: Hann window of ~1 s.
@@ -41,7 +42,8 @@ function [trialSpectFeatures, STFTs] = trialSpectralFeatures(data, stim, srate, 
 % Notes
 %   - PSDs are returned in PSD units, e.g. µV^2/Hz if input is µV.
 %   - Band power is integrated over frequency and therefore has units µV^2.
-%   - Trials shorter than the window length are marked invalid.
+%   - Artifact samples (stim == -1) are excluded before trial-wise analysis.
+%   - Trials shorter than the window length after artifact removal are marked invalid.
 
 fprintf('Calculating trial spectral features...\n');
 
@@ -82,38 +84,54 @@ end
 validateBands(bands);
 nCh = size(data,2);
 
-%% Catalogue trials from nonzero stim periods
-trial_sc_vec = zeros(size(stim));      % sample-wise trial number
-tr_sc = [];                        % one stim code per trial
+%% Catalogue trials while excluding artifact periods (stim == -1)
+artifactMask = stim == -1;
+validStimIdx = find(~artifactMask);
+
+if isempty(validStimIdx)
+    error('No non-artifact samples remain after excluding stim == -1.');
+end
+
+trial_sc_vec = zeros(size(stim));      % sample-wise trial number; artifacts remain 0
+tr_sc = [];                            % one stim code per trial
 trialStartIdx = [];
 trialStopIdx = [];
-trialCounter = 1;
-trial_sc_vec(1) = trialCounter;
-tr_sc(trialCounter,1) = stim(1);
-trialStartIdx(trialCounter,1) = 1;
 
-for n = 2:numel(stim)
-    % New trial/segment when stim code changes
-    if stim(n) ~= stim(n-1)
-        % Close previous trial
-        trialStopIdx(trialCounter,1) = n-1;
-        trialCounter = trialCounter + 1; % Start new trial
+trialCounter = 1;
+firstIdx = validStimIdx(1);
+trial_sc_vec(firstIdx) = trialCounter;
+tr_sc(trialCounter,1) = stim(firstIdx);
+trialStartIdx(trialCounter,1) = firstIdx;
+prevIdx = firstIdx;
+prevStim = stim(firstIdx);
+
+for k = 2:numel(validStimIdx)
+    n = validStimIdx(k);
+
+    % Start a new trial when the non-artifact stimulus code changes.
+    % Artifact samples between equal stimulus codes are simply clipped out.
+    if stim(n) ~= prevStim
+        trialStopIdx(trialCounter,1) = prevIdx;
+        trialCounter = trialCounter + 1;
         trialStartIdx(trialCounter,1) = n;
         tr_sc(trialCounter,1) = stim(n);
     end
+
     trial_sc_vec(n) = trialCounter;
+    prevIdx = n;
+    prevStim = stim(n);
 end
 
 % Close final trial
-trialStopIdx(trialCounter,1) = numel(stim);
+trialStopIdx(trialCounter,1) = prevIdx;
 nTrials = trialCounter;
 trialStartTime = (trialStartIdx - 1) ./ srate;
 trialStopTime  = (trialStopIdx - 1) ./ srate;
 
-% Trial validity
+% Trial validity after artifact samples have been removed
 validTrial = false(nTrials,1);
 for tr = 1:nTrials
-    validTrial(tr) = numel(trialStartIdx(tr):trialStopIdx(tr)) >= length(window);
+    validTrial(tr) = sum(trial_sc_vec == tr) >= length(window);
 end
 
 %% STFT across whole experiment
@@ -126,6 +144,10 @@ end
 % STFTs: [freq x time x channel]
 nFreq = numel(freqBins);
 nTime = numel(t_ax);
+
+% Map STFT time-bin centers to samples so artifact-centered bins can be excluded.
+stftSampleIdx = round(t_ax .* srate) + 1;
+stftSampleIdx = max(1, min(numel(stim), stftSampleIdx));
 
 %% Convert STFT coefficients to PSD
 winNorm = srate * sum(window.^2);
@@ -143,8 +165,10 @@ else
 end
 
 %% Mean PSD across whole experiment
+artifactTimeMask = artifactMask(stftSampleIdx);
+STFT_psd(:,artifactTimeMask,:) = NaN;
 meanPSD_stft = squeeze(mean(STFT_psd, 2, 'omitnan')).';  % [channels x freq]
-[meanPSD_welch, freq_bins] = pwelch(data, window, noverlap, nfft, srate);
+[meanPSD_welch, freq_bins] = pwelch(data(~artifactMask,:), window, noverlap, nfft, srate);
 
 %% Baseline normalization
 if isempty(baselinePSD)
@@ -182,8 +206,8 @@ for tr = 1:nTrials
         continue
     end
 
-    % Select STFT time bins whose centers fall inside trial
-    trialTimeMask = t_ax >= trialStartTime(tr) & t_ax <= trialStopTime(tr);
+    % Select STFT time bins whose centers belong to clean samples in this trial
+    trialTimeMask = trial_sc_vec(stftSampleIdx) == tr;
 
     if ~any(trialTimeMask)
         validTrial(tr) = false;
@@ -191,7 +215,7 @@ for tr = 1:nTrials
     end
 
     %% Trial PSD
-    trial_data = data(trial_sc_vec == tr, :); % Extract data for the current trial
+    trial_data = data(trial_sc_vec == tr, :); % Artifact samples are excluded
     % Extract trial power spectrum (using pwelch)
     trialPxx =  pwelch(trial_data, window, noverlap, nfft, srate);
 
@@ -275,6 +299,7 @@ trialSpectFeatures.info.nfft = nfft;
 trialSpectFeatures.info.bands = bands;
 trialSpectFeatures.info.baselineSource = baselineSource;
 trialSpectFeatures.info.minTrialSamples = length(window);
+trialSpectFeatures.info.artifactCode = -1;
 
 end
 

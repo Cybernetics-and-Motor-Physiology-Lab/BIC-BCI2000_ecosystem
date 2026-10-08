@@ -8,7 +8,7 @@
 % of long-term neural recording performance and signal evolution.
 %
 % Data availability: source recordings are available in BCI2000 .dat format
-% through OpenNeuro (doi:10.18112/openneuro.ds004624.v3.0.0).
+% through Dandi Archive (https://dandiarchive.org/dandiset/000571).
 %
 % Before running:
 %   1. Replace placeholder paths with local project/data locations.
